@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Lint Dockerfile
-        uses: hadolint/hadolint-action@v3
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
           # Info-level hints (e.g. DL3066 on `USER node`) are not failures.
@@ -38,7 +38,7 @@ jobs:
       - name: Lint entrypoint
         run: shellcheck docker-entrypoint.sh
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Lint TrueNAS generator
         working-directory: truenas
