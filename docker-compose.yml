@@ -1,0 +1,58 @@
+# Stages, run in order by `docker compose up -d`:
+#   1. update  - install/update global pnpm packages (+ agy) on the tools volume
+#   2. doctor  - seed initial OpenClaw config and run `openclaw doctor --fix`
+#   3. openclaw - the gateway, started only if both stages exited successfully
+#
+# Stages only run on `docker compose up`. A plain container restart (crash,
+# host reboot) restarts the gateway alone, without updating.
+
+x-openclaw-base: &openclaw-base
+  image: truenas-openclaw:latest
+  init: false # tini is already the image entrypoint
+  env_file:
+    - path: .env
+      required: false
+  # Named volumes inherit node (uid 1000) ownership from the image.
+  # For TrueNAS host paths instead, use e.g.
+  #   - /mnt/pool/apps/openclaw/tools:/home/node/.local
+  # and run `chown -R 1000:1000 /mnt/pool/apps/openclaw` first.
+  volumes:
+    - tools:/home/node/.local # pnpm global packages, pnpm store, agy binary
+    - openclaw:/home/node/.openclaw
+    - claude:/home/node/.claude
+    - gemini:/home/node/.gemini
+
+services:
+  update:
+    <<: *openclaw-base
+    build: .
+    container_name: openclaw-update
+    command: ["update"]
+    restart: "no"
+
+  doctor:
+    <<: *openclaw-base
+    container_name: openclaw-doctor
+    command: ["doctor"]
+    restart: "no"
+    depends_on:
+      update:
+        condition: service_completed_successfully
+
+  openclaw:
+    <<: *openclaw-base
+    container_name: openclaw
+    restart: unless-stopped
+    environment:
+      RUN_SETUP: "0" # setup already done by the update and doctor stages
+    ports:
+      - "18789:18789"
+    depends_on:
+      doctor:
+        condition: service_completed_successfully
+
+volumes:
+  tools:
+  openclaw:
+  claude:
+  gemini:
