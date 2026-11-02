@@ -1,0 +1,16 @@
+{
+  "image_source": "inline",
+  "network_mode": "proxy",
+  "proxy_network": {
+    "name": "ix-nginx-proxy-manager_default",
+    "hostname": "openclaw"
+  },
+  "public_urls": ["https://openclaw.example.com"],
+  "storage": {
+    "kind": "host",
+    "base_path": "/mnt/tank/apps/openclaw"
+  },
+  "timezone": "Europe/Madrid",
+  "packages": ["openclaw", "@anthropic-ai/claude-code"],
+  "skip_update": false
+}

@@ -91,7 +91,17 @@ install_agy() {
     curl -fsSL "$AGY_INSTALL_URL" | bash || die "agy install failed"
 }
 
+uses_trusted_proxy_auth() {
+    case "${OPENCLAW_CONFIG_OVERRIDES:-}" in
+        *'"trusted-proxy"'*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 warn_if_gateway_auth_missing() {
+    if uses_trusted_proxy_auth; then
+        return
+    fi
     if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ] && [ -z "${OPENCLAW_GATEWAY_PASSWORD:-}" ]; then
         warn "OPENCLAW_GATEWAY_TOKEN is not set; the gateway refuses to bind to lan without auth unless gateway.auth is configured"
     fi
@@ -111,6 +121,19 @@ ensure_openclaw_config() {
     ]" || die "could not write initial OpenClaw config"
 }
 
+# Settings from the generated YAML (JSON array for `openclaw config set
+# --batch-json`, e.g. the auth mode). Applied on every deploy so that a
+# regenerated YAML wins over what an earlier one wrote. Failing is fatal: the
+# gateway must not start with the wrong authentication settings.
+apply_config_overrides() {
+    if [ -z "${OPENCLAW_CONFIG_OVERRIDES:-}" ]; then
+        return
+    fi
+    log "Applying OpenClaw config overrides"
+    openclaw config set --batch-json "$OPENCLAW_CONFIG_OVERRIDES" \
+        || die "could not apply OPENCLAW_CONFIG_OVERRIDES"
+}
+
 run_openclaw_doctor() {
     log "Running openclaw doctor"
     openclaw doctor --fix --non-interactive || warn "openclaw doctor reported problems"
@@ -125,6 +148,7 @@ stage_update() {
 stage_doctor() {
     command -v openclaw >/dev/null || die "openclaw is not installed; run the update stage first"
     ensure_openclaw_config
+    apply_config_overrides
     run_openclaw_doctor
 }
 

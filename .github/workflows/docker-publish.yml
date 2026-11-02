@@ -4,8 +4,11 @@ on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
+    # Docs-only changes don't alter the image or the code under test.
+    paths-ignore: ["**.md"]
   pull_request:
     branches: [main]
+    paths-ignore: ["**.md"]
   # Weekly rebuild: Alpine packages and the node:24-alpine base are not pinned,
   # so this picks up security fixes without a code change.
   schedule:
@@ -48,7 +51,7 @@ jobs:
 
       - name: Test TrueNAS generator
         working-directory: truenas
-        run: uv run --no-project --with pytest --with pyyaml --with questionary pytest
+        run: uv run --no-project --with pytest --with pyyaml --with questionary --with python-dotenv pytest
 
   build:
     needs: lint
@@ -63,6 +66,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v4
+        with:
+          # Only the arm64 emulator is needed; amd64 builds natively.
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v4
 
@@ -96,8 +102,12 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Always check for a newer base image (matters for the weekly rebuild).
+          # Always check for a newer base image.
           pull: true
+          # Layer cache shared across runs. The weekly scheduled run ignores it
+          # so that unpinned layers (apk packages, pnpm@latest) are refreshed;
+          # it still writes the fresh layers back for the next runs.
+          no-cache: ${{ github.event_name == 'schedule' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

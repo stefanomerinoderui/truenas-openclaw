@@ -8,16 +8,18 @@ image that was already pushed to a registry.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import yaml
 
 CONTAINER_PORT = 18789
 APP_UID = 1000
 LOCAL_IMAGE = "truenas-openclaw:latest"
+DEFAULT_IMAGE = "ghcr.io/stefanomerinoderui/truenas-openclaw:latest"
 ENTRYPOINT_TARGET = "/opt/openclaw/docker-entrypoint.sh"
 ENTRYPOINT_CONFIG = "openclaw-entrypoint"
 DEFAULT_PACKAGES = "openclaw @anthropic-ai/claude-code"
@@ -36,6 +38,34 @@ COPY_ENTRYPOINT_PATTERN = re.compile(
 
 
 @dataclass(frozen=True)
+class ExtraNetwork:
+    """Pre-existing Docker network the gateway joins (e.g. a reverse proxy's)."""
+
+    name: str
+    hostname: str
+
+
+@dataclass(frozen=True)
+class TrustedProxy:
+    """Delegate gateway authentication to a reverse proxy (``trusted-proxy`` mode)."""
+
+    proxies: tuple[str, ...]
+    user_header: str
+    required_headers: tuple[str, ...] = ()
+    allow_users: tuple[str, ...] = ()
+    allow_loopback: bool = False
+    device_auto_approve: bool = False
+    device_scopes: tuple[str, ...] = ()
+    identity_scopes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.proxies:
+            raise ValueError("trusted-proxy auth needs at least one trusted proxy")
+        if not self.user_header:
+            raise ValueError("trusted-proxy auth needs the user header name")
+
+
+@dataclass(frozen=True)
 class Storage:
     kind: Literal["volumes", "host"]
     base_path: str = ""
@@ -43,24 +73,43 @@ class Storage:
 
 @dataclass(frozen=True)
 class Secrets:
+    # Empty with trusted-proxy auth: the gateway refuses to start with both.
     gateway_token: str
     anthropic_api_key: str = ""
     antigravity_api_key: str = ""
+    # Only used with trusted-proxy auth, for internal clients that bypass the proxy.
+    gateway_password: str = ""
 
 
 @dataclass(frozen=True)
 class AppConfig:
     image_source: Literal["inline", "prebuilt"]
-    network_mode: Literal["bridge", "host"]
+    network_mode: Literal["proxy", "bridge", "host"]
     host_port: int
     storage: Storage
     secrets: Secrets
     control_ui_origins: tuple[str, ...]
     prebuilt_image: str = ""
-    bind_address: str = "0.0.0.0"
+    bind_addresses: tuple[str, ...] = ("0.0.0.0",)
+    extra_network: ExtraNetwork | None = None
+    trusted_proxy: TrustedProxy | None = None
     timezone: str = "UTC"
     skip_update: bool = False
     packages: str = DEFAULT_PACKAGES
+
+    def __post_init__(self) -> None:
+        if self.extra_network and self.network_mode == "host":
+            raise ValueError("host network mode cannot join another Docker network")
+        if self.network_mode == "proxy" and not self.extra_network:
+            raise ValueError("proxy mode requires the proxy network to join")
+        if self.network_mode == "bridge" and not self.bind_addresses:
+            raise ValueError("at least one bind address is required in bridge mode")
+        if self.trusted_proxy and self.secrets.gateway_token:
+            raise ValueError(
+                "the gateway refuses to start with trusted-proxy auth and a gateway token"
+            )
+        if not self.trusted_proxy and not self.secrets.gateway_token:
+            raise ValueError("a gateway token is required without trusted-proxy auth")
 
     @property
     def gateway_port(self) -> int:
@@ -70,6 +119,18 @@ class AppConfig:
     @property
     def image(self) -> str:
         return self.prebuilt_image if self.image_source == "prebuilt" else LOCAL_IMAGE
+
+
+def is_ipv6(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host.strip("[]")).version == 6
+    except ValueError:
+        return False
+
+
+def format_host(host: str) -> str:
+    """Bracket IPv6 literals so they can be followed by ``:port``."""
+    return f"[{host.strip('[]')}]" if is_ipv6(host) else host
 
 
 def escape_interpolation(text: str) -> str:
@@ -94,16 +155,66 @@ def volume_mounts(storage: Storage) -> list[str]:
     return [f"{name}:{target}" for name, target in MOUNTS.items()]
 
 
+def config_overrides(config: AppConfig) -> list[dict[str, Any]]:
+    """OpenClaw settings re-applied on every deploy (``openclaw config set`` batch).
+
+    Always sets the auth mode, so switching between token and trusted-proxy auth
+    in a regenerated YAML never leaves the previous mode behind.
+    """
+    proxy = config.trusted_proxy
+    if proxy is None:
+        return [{"path": "gateway.auth.mode", "value": "token"}]
+
+    prefix = "gateway.auth.trustedProxy"
+    overrides: list[dict[str, Any]] = [
+        {"path": "gateway.auth.mode", "value": "trusted-proxy"},
+        {"path": "gateway.trustedProxies", "value": list(proxy.proxies)},
+        {"path": f"{prefix}.userHeader", "value": proxy.user_header},
+        {"path": f"{prefix}.requiredHeaders", "value": list(proxy.required_headers)},
+        {"path": f"{prefix}.allowUsers", "value": list(proxy.allow_users)},
+        {"path": f"{prefix}.allowLoopback", "value": proxy.allow_loopback},
+        {
+            "path": f"{prefix}.deviceAutoApprove.enabled",
+            "value": proxy.device_auto_approve,
+        },
+    ]
+    if proxy.device_scopes:  # otherwise OpenClaw's own default scopes apply
+        overrides.append(
+            {
+                "path": f"{prefix}.deviceAutoApprove.scopes",
+                "value": list(proxy.device_scopes),
+            }
+        )
+    overrides.append(
+        {
+            "path": "gateway.auth.identityScopes",
+            "value": {
+                identity: list(scopes)
+                for identity, scopes in proxy.identity_scopes.items()
+            },
+        }
+    )
+    return overrides
+
+
 def environment(config: AppConfig) -> dict[str, str]:
-    env = {
-        "TZ": config.timezone,
-        "OPENCLAW_GATEWAY_TOKEN": config.secrets.gateway_token,
-        "OPENCLAW_CONTROL_UI_ORIGINS": json.dumps(
-            list(config.control_ui_origins), separators=(",", ":")
-        ),
-        "PNPM_GLOBAL_PACKAGES": config.packages,
-        "SKIP_UPDATE": "1" if config.skip_update else "0",
-    }
+    env = {"TZ": config.timezone}
+    if not config.trusted_proxy:
+        env["OPENCLAW_GATEWAY_TOKEN"] = config.secrets.gateway_token
+    env.update(
+        {
+            "OPENCLAW_CONTROL_UI_ORIGINS": json.dumps(
+                list(config.control_ui_origins), separators=(",", ":")
+            ),
+            "OPENCLAW_CONFIG_OVERRIDES": json.dumps(
+                config_overrides(config), separators=(",", ":")
+            ),
+            "PNPM_GLOBAL_PACKAGES": config.packages,
+            "SKIP_UPDATE": "1" if config.skip_update else "0",
+        }
+    )
+    if config.trusted_proxy and config.secrets.gateway_password:
+        env["OPENCLAW_GATEWAY_PASSWORD"] = config.secrets.gateway_password
     if config.secrets.anthropic_api_key:
         env["ANTHROPIC_API_KEY"] = config.secrets.anthropic_api_key
     if config.secrets.antigravity_api_key:
@@ -175,8 +286,15 @@ def _gateway_service(config: AppConfig, mounts: list[str]) -> dict:
     ]
     if config.network_mode == "bridge":
         service["ports"] = [
-            f"{config.bind_address}:{config.host_port}:{CONTAINER_PORT}"
+            f"{format_host(address)}:{config.host_port}:{CONTAINER_PORT}"
+            for address in config.bind_addresses
         ]
+    if config.extra_network:
+        extra = config.extra_network
+        service["hostname"] = extra.hostname
+        # Docker DNS resolves aliases, not the hostname, on user-defined networks.
+        # Listing only this network keeps the gateway off the project's own one.
+        service["networks"] = {extra.name: {"aliases": [extra.hostname]}}
     service["healthcheck"] = {
         "test": [
             "CMD",
@@ -229,6 +347,8 @@ def build_compose(config: AppConfig, dockerfile: str, entrypoint: str) -> dict:
         }
     if config.storage.kind == "volumes":
         compose["volumes"] = {name: {} for name in MOUNTS}
+    if config.extra_network:
+        compose["networks"] = {config.extra_network.name: {"external": True}}
     return compose
 
 
