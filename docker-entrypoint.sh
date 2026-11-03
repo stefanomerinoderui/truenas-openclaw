@@ -80,6 +80,28 @@ approve_global_builds() {
     pnpm approve-builds -g --all
 }
 
+# pnpm exposes `claude` as a #!/bin/sh shim that execs the native binary from a
+# versioned directory. OpenClaw's claude-cli backend refuses a shim ("cannot be
+# bound to one durable absolute owner"), so link the binary itself into
+# NATIVE_BIN_DIR, which is first in PATH. Re-linked on every update because the
+# versioned directory changes when pnpm reinstalls the package.
+link_claude_binary() {
+    shim="$PNPM_HOME/bin/claude"
+    link="${NATIVE_BIN_DIR:-$HOME/.local/native-bin}/claude"
+    target=""
+    if [ -f "$shim" ]; then
+        target="$(sed -n 's/^# cmd-shim-target=//p' "$shim" | head -n 1)"
+    fi
+    if [ -z "$target" ] || [ ! -x "$target" ]; then
+        rm -f "$link"
+        [ -f "$shim" ] && warn "could not find the claude binary behind $shim; OpenClaw's claude-cli backend may refuse it"
+        return 0
+    fi
+    mkdir -p "${link%/*}"
+    ln -sfn "$target" "$link"
+    log "Linked $link -> $target"
+}
+
 # agy is a standalone binary, not an npm package. Its installer refuses to run
 # over an existing binary because agy self-updates while in use, so only
 # install it when missing.
@@ -142,6 +164,7 @@ run_openclaw_doctor() {
 stage_update() {
     check_volume_writable
     install_or_update_pnpm_packages
+    link_claude_binary
     install_agy
 }
 

@@ -33,14 +33,19 @@ RUN corepack enable pnpm \
     && pnpm --version \
     && chmod -R a+rX "$COREPACK_HOME"
 
-# pnpm 12 links global binaries into $PNPM_HOME/bin.
+# pnpm 12 links global binaries into $PNPM_HOME/bin as #!/bin/sh shims.
+# NATIVE_BIN_DIR holds direct symlinks to native binaries behind those shims
+# (kept up to date by docker-entrypoint.sh) and comes first in PATH: OpenClaw's
+# claude-cli backend only runs a `claude` it can fingerprint, which a shim isn't.
 ENV PNPM_HOME=/home/node/.local/share/pnpm \
+    NATIVE_BIN_DIR=/home/node/.local/native-bin \
     USE_BUILTIN_RIPGREP=0
-ENV PATH=$PNPM_HOME/bin:$PNPM_HOME:/home/node/.local/bin:$PATH
+ENV PATH=$NATIVE_BIN_DIR:$PNPM_HOME/bin:$PNPM_HOME:/home/node/.local/bin:$PATH
 
 # Pre-create mount points owned by node so named volumes inherit the ownership.
 RUN mkdir -p \
         "$PNPM_HOME" \
+        "$NATIVE_BIN_DIR" \
         /home/node/.local/bin \
         /home/node/.openclaw \
         /home/node/.claude \
