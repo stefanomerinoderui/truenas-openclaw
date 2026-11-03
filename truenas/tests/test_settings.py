@@ -285,8 +285,8 @@ def test_example_config_is_valid():
 
 TRUSTED_JSON = {
     **PROXY_JSON,
+    "trusted_proxies": ["172.18.0.0/16"],
     "trusted_proxy": {
-        "proxies": ["172.18.0.0/16"],
         "user_header": "X-Auth-Request-Email",
         "required_headers": ["X-Forwarded-Proto"],
         "allow_users": ["me@example.com"],
@@ -299,9 +299,9 @@ def test_trusted_proxy_is_off_by_default():
 
 
 def test_trusted_proxy_section_is_read_and_headers_are_lowercased():
-    proxy = parse_settings(TRUSTED_JSON).trusted_proxy
-    assert proxy == TrustedProxy(
-        proxies=("172.18.0.0/16",),
+    settings = parse_settings(TRUSTED_JSON)
+    assert settings.trusted_proxies == ("172.18.0.0/16",)
+    assert settings.trusted_proxy == TrustedProxy(
         user_header="x-auth-request-email",
         required_headers=("x-forwarded-proto",),
         allow_users=("me@example.com",),
@@ -325,60 +325,90 @@ def test_trusted_proxy_advanced_options_are_read():
     assert proxy.identity_scopes == {"admin@example.com": ("operator.admin",)}
 
 
+IP = ["10.0.0.1"]
+
+
 @pytest.mark.parametrize(
-    ("section", "expected"),
+    ("proxies", "section", "expected"),
     [
-        ({}, "trusted_proxy.proxies: required"),
-        ({"proxies": ["10.0.0.1"]}, "trusted_proxy.user_header: required"),
+        (None, {"user_header": "x"}, "trusted_proxies: required with trusted-proxy"),
+        (IP, {}, "trusted_proxy.user_header: required"),
         (
-            {"proxies": ["0.0.0.0/0"], "user_header": "x"},
-            "trusted_proxy.proxies: 0.0.0.0/0 would trust every source",
+            ["0.0.0.0/0"],
+            {"user_header": "x"},
+            "trusted_proxies: 0.0.0.0/0 would trust every source",
         ),
         (
-            {"proxies": ["proxy.local"], "user_header": "x"},
-            "trusted_proxy.proxies: Not a valid IP address or CIDR",
+            ["proxy.local"],
+            {"user_header": "x"},
+            "trusted_proxies: Not a valid IP address or CIDR",
         ),
         (
-            {"proxies": ["10.0.0.1"], "user_header": "bad header"},
+            IP,
+            {"user_header": "bad header"},
             "trusted_proxy.user_header: Enter an HTTP header name",
         ),
         (
-            {"proxies": ["10.0.0.1"], "user_header": "x", "allow_users": "me"},
+            IP,
+            {"user_header": "x", "allow_users": "me"},
             "trusted_proxy.allow_users: must be a list of strings",
         ),
         (
-            {"proxies": ["10.0.0.1"], "user_header": "x", "allow_loopback": "yes"},
+            IP,
+            {"user_header": "x", "allow_loopback": "yes"},
             "trusted_proxy.allow_loopback: must be true or false",
         ),
         (
-            {"proxies": ["10.0.0.1"], "user_header": "x", "identity_scopes": ["a"]},
+            IP,
+            {"user_header": "x", "identity_scopes": ["a"]},
             "trusted_proxy.identity_scopes: must be an object",
         ),
         (
-            {
-                "proxies": ["10.0.0.1"],
-                "user_header": "x",
-                "identity_scopes": {"a@example.com": "operator.read"},
-            },
+            IP,
+            {"user_header": "x", "identity_scopes": {"a@example.com": "operator.read"}},
             "trusted_proxy.identity_scopes.a@example.com: must be a list",
         ),
         (
-            {
-                "proxies": ["10.0.0.1"],
-                "user_header": "x",
-                "device_auto_approve": {"enabled": "no"},
-            },
+            IP,
+            {"user_header": "x", "device_auto_approve": {"enabled": "no"}},
             "trusted_proxy.device_auto_approve.enabled: must be true or false",
         ),
         (
-            {"proxies": ["10.0.0.1"], "user_header": "x", "userheader": "typo"},
+            IP,
+            {"user_header": "x", "userheader": "typo"},
             "trusted_proxy.userheader: unknown setting",
         ),
     ],
 )
-def test_trusted_proxy_errors_are_reported_without_crashing(section, expected):
-    problems = problems_of({**PROXY_JSON, "trusted_proxy": section})
+def test_trusted_proxy_errors_are_reported_without_crashing(proxies, section, expected):
+    data = {**PROXY_JSON, "trusted_proxy": section}
+    if proxies is not None:
+        data["trusted_proxies"] = proxies
+    problems = problems_of(data)
     assert any(expected in problem for problem in problems), problems
+
+
+def test_trusted_proxies_are_optional_with_token_auth():
+    assert parse_settings(PROXY_JSON).trusted_proxies == ()
+    settings = parse_settings({**PROXY_JSON, "trusted_proxies": ["10.0.0.1", "::1"]})
+    assert settings.trusted_proxies == ("10.0.0.1", "::1")
+    assert settings.trusted_proxy is None
+    assert settings_to_dict(settings)["trusted_proxies"] == ["10.0.0.1", "::1"]
+    assert "trusted_proxies" not in settings_to_dict(parse_settings(PROXY_JSON))
+
+
+def test_invalid_trusted_proxies_are_reported_with_token_auth_too():
+    problems = problems_of({**PROXY_JSON, "trusted_proxies": ["0.0.0.0/0"]})
+    assert any(p.startswith("trusted_proxies: 0.0.0.0/0") for p in problems)
+
+
+def test_older_configs_with_nested_proxies_still_load():
+    data = {**PROXY_JSON, "trusted_proxy": {"proxies": IP, "user_header": "x"}}
+    settings = parse_settings(data)
+    assert settings.trusted_proxies == ("10.0.0.1",)
+    saved = settings_to_dict(settings)
+    assert saved["trusted_proxies"] == IP
+    assert "proxies" not in saved["trusted_proxy"]
 
 
 def test_trusted_proxy_must_be_an_object():
@@ -391,7 +421,7 @@ def test_trusted_proxy_must_be_an_object():
 def test_trusted_proxy_round_trips_and_only_saves_non_defaults():
     plain = parse_settings(TRUSTED_JSON)
     saved = settings_to_dict(plain)["trusted_proxy"]
-    assert set(saved) == {"proxies", "user_header", "required_headers", "allow_users"}
+    assert set(saved) == {"user_header", "required_headers", "allow_users"}
     assert parse_settings(json.loads(json.dumps(settings_to_dict(plain)))) == plain
 
     advanced = parse_settings(

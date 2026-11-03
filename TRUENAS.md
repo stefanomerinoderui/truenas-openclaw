@@ -1,6 +1,6 @@
 # Installing on TrueNAS via YAML
 
-This guide deploys the OpenClaw stack as a TrueNAS custom app using **Apps > Discover > ⋮ (top-right menu) > Install via YAML**. The YAML is produced by an interactive generator, so no files have to be copied to the NAS.
+This guide deploys the OpenClaw stack as a TrueNAS custom app using **Apps > Discover > ⋮ (top-right menu) > Install via YAML**. The YAML is produced by a full-screen terminal generator, so no files have to be copied to the NAS.
 
 ## Prerequisites
 
@@ -12,41 +12,66 @@ Optional but recommended: create a dataset for the app data, e.g. `tank/apps/ope
 
 ## 1. Generate the YAML
 
-From the repository root:
+The generator is a full-screen terminal app. From the repository root:
 
 ```sh
-uv run truenas/generate_yaml.py                            # interactive, writes openclaw-truenas.yaml
-uv run truenas/generate_yaml.py -o my.yaml                 # custom output path
-uv run truenas/generate_yaml.py --config openclaw-truenas.json  # no prompts, see "JSON config" below
+uv run truenas/generate_yaml.py                                   # new config
+uv run truenas/generate_yaml.py --config openclaw-truenas.json    # open and edit a config
+uv run truenas/generate_yaml.py --env-file ~/secrets.env -o my.yaml
 ```
 
-The TUI walks through these sections (arrow keys to select, Enter to confirm, Ctrl-C to abort):
+| Option | Description |
+|---|---|
+| `-c`, `--config FILE` | JSON config to open in the editor. A file that doesn't exist yet starts a new config that is saved there. A config with invalid values still opens, with the problems marked so you can fix them; only broken JSON is refused. |
+| `--env-file FILE` | Secrets file (default `./.env` when it exists). See [Secrets](#json-config-and-env-file). |
+| `-o`, `--output FILE` | YAML to write (default `openclaw-truenas.yaml`); can also be changed on the *Review & generate* page. |
 
-| Section | Prompt | Notes |
+```
+┌ OpenClaw TrueNAS generator ──────────────────── openclaw-truenas.json * ┐
+│ Image              │  Network mode                                      │
+│ Network ⚠          │   (•) Reverse proxy: join its Docker network ...   │
+│ Authentication     │   ( ) Bridge: publish the gateway port on TrueNAS  │
+│ Storage            │   ( ) Host network: use the TrueNAS network stack  │
+│ Environment        │  Public URL(s) served by the proxy                 │
+│ Secrets            │   [not-a-url                                  ]    │
+│ Review & generate  │   Not an origin URL (scheme://host[:port])         │
+│ ^s Save config  ^g Generate YAML  esc Menu  ^q Quit                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Using it**
+- The menu on the left lists the sections. Move with the arrow keys (the form on the right follows), press **Enter** to jump into a section, and **Esc** to go back to the menu. **Tab** moves between fields; the mouse works too. **Space** toggles switches and radio buttons.
+- Every change is checked immediately: a problem appears under its field and the section gets a `⚠` in the menu. *Review & generate* lists all problems; *Generate* and *Save* stay disabled until they are fixed.
+- Optional settings are switched on where they live, and their fields appear when you do: *Also join an existing Docker network* (bridge mode), *Delegate authentication to the reverse proxy* (Authentication), *Auto-approve new UI operator devices*, *Allow a same-host loopback proxy*. Fields that don't apply to the chosen mode are hidden and left out of the config.
+- List fields (URLs, hosts, bind addresses, proxy IPs, headers, users, packages, scopes) take comma-separated values or a JSON list such as `["10.0.0.1", "172.17.0.1"]`. *Per-identity operator scopes* takes a JSON object.
+- The title shows the config file and `*` when there are unsaved changes. Quitting with unsaved changes asks whether to save, discard or cancel.
+
+| Key | Action |
+|---|---|
+| Ctrl+S | Save the config (asks for a file name the first time) |
+| Ctrl+G | Generate the YAML |
+| Esc | Back to the menu |
+| Ctrl+Q | Quit |
+
+**Sections**
+
+| Section | Fields | Notes |
 |---|---|---|
-| Image | Build from embedded Dockerfile / prebuilt image | **Build** (default) embeds the `Dockerfile` and `docker-entrypoint.sh` into the YAML; TrueNAS builds the image itself. **Prebuilt** pulls an image you pushed to a registry (see [Prebuilt image](#prebuilt-image)). |
+| Image | Build from embedded Dockerfile / prebuilt image, image reference | **Build** (default) embeds the `Dockerfile` and `docker-entrypoint.sh` into the YAML; TrueNAS builds the image itself. **Prebuilt** pulls an image you pushed to a registry (see [Prebuilt image](#prebuilt-image)). |
 | Network | Reverse proxy / bridge / host | **Reverse proxy** (default, recommended) joins the proxy's existing Docker network and publishes **no ports**: the gateway is only reachable through the proxy, which is what exposes 80/443. **Bridge** publishes the gateway port on TrueNAS; **host** uses the TrueNAS network stack directly (no port mapping). |
-| | Existing network name, hostname | Reverse proxy mode. Network to join (default `ix-nginx-proxy-manager_default`) and the hostname the container has on it (default `openclaw`). See [Reverse proxy](#reverse-proxy-nginx-proxy-manager). |
+| | Existing network name, hostname | Reverse proxy mode, or bridge mode with *Also join an existing Docker network*. Network to join (default `ix-nginx-proxy-manager_default`) and the hostname the container has on it (default `openclaw`). See [Reverse proxy](#reverse-proxy-nginx-proxy-manager). |
 | | Public URL(s) | Reverse proxy mode. The URL(s) the proxy serves, e.g. `https://openclaw.example.com`; they become the Control UI allowed origins. |
 | | Gateway port | Bridge / host. Port on TrueNAS, default `18789`. Avoid ports already used by the TrueNAS UI (80/443) or other apps. |
-| | Bind addresses | Bridge only. Comma-separated list of IPs the port is published on, e.g. `192.168.1.5, 10.0.0.2` (one published port per address). `0.0.0.0` = all interfaces and can't be combined with specific IPv4 addresses (port conflict); IPv6 addresses are supported. |
-| | Also join an existing Docker network | Bridge only, optional. Same network name and hostname questions as in reverse proxy mode, in addition to the published port. |
-| | TrueNAS hostnames/IPs | Bridge / host. Used to build the Control UI allowed origins (`http://<host>:<port>`); `localhost` is always added. |
-| | Extra origins | Bridge / host. Optional full URLs, e.g. a reverse proxy `https://openclaw.example.com`. |
-| Authentication | Trusted-proxy auth (default: no) | Opt in to let the reverse proxy authenticate users instead of a gateway token. Asks for the trusted proxy IPs/CIDRs, the header carrying the user, headers the proxy must always send and the allowed users. See [Trusted-proxy authentication](#trusted-proxy-authentication). |
+| | Bind addresses | Bridge only. IPs the port is published on, e.g. `192.168.1.5, 10.0.0.2` (one published port per address). `0.0.0.0` = all interfaces and can't be combined with specific IPv4 addresses (port conflict); IPv6 addresses are supported. |
+| | TrueNAS hostnames/IPs, extra origins | Bridge / host. Build the Control UI allowed origins (`http://<host>:<port>`, plus `localhost`); extra origins are full URLs, e.g. a reverse proxy's. |
+| Authentication | Trusted proxies | Always shown: one or more IPs (or CIDRs) of your reverse proxies (`gateway.trustedProxies`). Optional with token auth, where it lets the gateway trust their `X-Forwarded-*` headers; required for trusted-proxy auth. |
+| | Trusted-proxy auth (off by default) | Let the reverse proxy authenticate users instead of a gateway token: the user header, required headers, allowed users, and the advanced options. See [Trusted-proxy authentication](#trusted-proxy-authentication). |
 | Storage | Host paths / named volumes | **Host paths** creates `tools/`, `openclaw/`, `claude/`, `gemini/` under the base path (e.g. `/mnt/tank/apps/openclaw`) and adds a `permissions` stage that `chown`s them to uid 1000. **Named volumes** are managed by Docker. |
-| Environment | Timezone | Defaults to this machine's timezone. |
-| | Global pnpm packages | Default `openclaw @anthropic-ai/claude-code`. |
-| | Skip package updates | `no` = update on every start (only missing packages are installed when `yes`). |
-| Secrets | Gateway token | Random 64-hex token by default; shown after writing so you can save it. Not asked if `OPENCLAW_GATEWAY_TOKEN` is in the env file or environment, nor with trusted-proxy auth. |
-| | `OPENCLAW_GATEWAY_PASSWORD` | Trusted-proxy auth only, optional: lets internal clients that bypass the proxy authenticate. |
-| | `ANTHROPIC_API_KEY`, `ANTIGRAVITY_API_KEY` | Optional; leave empty to log in interactively later. Not asked if already in the env file or environment. |
+| Environment | Timezone, global pnpm packages, skip package updates | Timezone defaults to this machine's. Packages default to `openclaw @anthropic-ai/claude-code`. Without *Skip*, packages are updated on every start. |
+| Secrets | Gateway token, API keys, gateway password | Pre-filled from the env file / environment, masked (*Show values* reveals them). Without a token in the env file a random one is generated; *Generate* makes a new one. The gateway password is only used with trusted-proxy auth. Never saved to the config. |
+| Review & generate | Summary, output file, buttons | *Generate YAML*, *Copy YAML to clipboard*, *Save config*, *Save config as...*. |
 
-After the summary it writes the YAML with mode `600`, then:
-
-- If the gateway token was **generated**, it offers to show it so you can save it. A token you typed in yourself, or loaded from the env file, is never echoed back.
-- It offers to **save your answers as a JSON config** (default `openclaw-truenas.json`), so the next run needs no prompts. Secrets are never included. See [JSON config](#json-config-and-env-file).
-- It offers to **copy the YAML to your clipboard**, using the first backend that fits your environment and is installed:
+The YAML is written with mode `600`. *Copy YAML to clipboard* uses the first backend that fits your environment and is installed:
 
   | Environment | Backend |
   |---|---|
@@ -58,34 +83,26 @@ After the summary it writes the YAML with mode `600`, then:
   | Termux | `termux-clipboard-set` |
   | Anything else in a terminal, e.g. over SSH | OSC 52 escape sequence (needs a terminal that allows it; there is no confirmation that it worked) |
 
-  If no backend is available it says so and you can copy the YAML from the file instead. The clipboard then holds the gateway token and API keys, so clear it after pasting.
+
+  When none is available, the copy goes through the terminal (OSC 52); there is no confirmation that it worked, so paste to check. The clipboard then holds the gateway token and API keys, so clear it after pasting.
 
 > **The YAML contains the gateway token and any API keys.** Don't commit or share it, and delete the local file once the app is installed.
 
 ### JSON config and env file
 
-For repeatable, prompt-free runs, put every setting except secrets in a JSON file and the secrets in an env file:
-
-```sh
-uv run truenas/generate_yaml.py --config openclaw-truenas.json            # secrets from ./.env if it exists
-uv run truenas/generate_yaml.py --config my.json --env-file ~/secrets.env # explicit env file
-```
-
-The easiest way to get a config is to answer the prompts once and accept *Save these settings as a JSON config* at the end. The saved file only contains keys relevant to the chosen modes; [`truenas/config.example.json`](truenas/config.example.json) is a ready-made example.
+The config (*Save config*, default `openclaw-truenas.json`) holds every setting except secrets, so it can be shared or committed. Open it again with `--config` to change something and regenerate. The saved file only contains keys relevant to the chosen modes; [`truenas/config.example.json`](truenas/config.example.json) is a ready-made example. Unknown keys and secrets found in a config you open are reported and dropped when you save.
 
 **Secrets** come from a dotenv-style file (`--env-file`, default `./.env` when it exists) and from real environment variables, which win over the file. Only these variables are read; empty values count as unset:
 
 | Variable | If missing |
 |---|---|
-| `OPENCLAW_GATEWAY_TOKEN` | Config mode generates a random token (stored only in the YAML) and tells you so. Interactive mode asks. |
+| `OPENCLAW_GATEWAY_TOKEN` | A random token is generated in the Secrets section. Put it in the env file to keep the same token every time you regenerate. |
 | `ANTHROPIC_API_KEY`, `ANTIGRAVITY_API_KEY` | Left out of the YAML; log in with `claude` / `agy` later. |
-| `OPENCLAW_GATEWAY_PASSWORD` | Only used with trusted-proxy auth (optional); ignored, with a notice, otherwise. |
+| `OPENCLAW_GATEWAY_PASSWORD` | Only used with trusted-proxy auth (optional); a notice says when it is ignored. |
 
-With trusted-proxy auth enabled, `OPENCLAW_GATEWAY_TOKEN` is ignored (with a notice) and left out of the YAML: the gateway refuses to start with both.
+With trusted-proxy auth enabled, `OPENCLAW_GATEWAY_TOKEN` is not used (a notice says so) and is left out of the YAML: the gateway refuses to start with both.
 
-Put the token in the env file to keep the same token every time you regenerate. A secret in the JSON is rejected with an error, so a config can be shared or committed safely. The interactive mode also uses the env file and skips the prompts for the secrets it finds.
-
-**JSON keys.** Unknown keys, wrong types and invalid values are all reported together, and nothing is written until the config is valid. Keys that don't apply to the chosen `network_mode` are ignored.
+**JSON keys.** The config can also be written by hand; the editor shows any problem when you open it.
 
 | Key | Applies to | Default | Description |
 |---|---|---|---|
@@ -98,6 +115,7 @@ Put the token in the env file to keep the same token every time you regenerate. 
 | `bind_addresses` | `bridge` | `["0.0.0.0"]` | IPs the port is published on (one mapping each). |
 | `hosts` | `bridge`, `host` | **required** | TrueNAS hostnames/IPs used to open the Control UI. |
 | `extra_origins` | `bridge`, `host` | `[]` | Additional allowed origin URLs. |
+| `trusted_proxies` | all | `[]` | IPs or CIDRs of your reverse proxies (`gateway.trustedProxies`). Optional with token auth; required with `trusted_proxy`. Always written on deploy, so removing them here clears them in OpenClaw. |
 | `trusted_proxy` | all | off | Trusted-proxy authentication, see [below](#trusted-proxy-authentication). Omit or `null` to keep gateway-token auth. |
 | `storage` | all | **required** | `{"kind": "volumes"}` or `{"kind": "host", "base_path": "/mnt/<pool>/..."}` (`base_path` is required for `host`). |
 | `timezone` | all | this machine's timezone | IANA name, e.g. `Europe/Madrid`. |
@@ -113,8 +131,6 @@ A minimal config for the recommended setup:
   "storage": { "kind": "host", "base_path": "/mnt/tank/apps/openclaw" }
 }
 ```
-
-With `--config` the generator never prompts: it prints a summary, writes the YAML and, when run from a terminal, offers the clipboard copy. That makes it usable from scripts as long as the secrets are in the env file or environment.
 
 ## 2. Install in TrueNAS
 
@@ -189,14 +205,14 @@ Reverse proxy mode isn't available together with host networking (a container on
 
 By default the Control UI is protected by the gateway token. Behind an identity-aware proxy (oauth2-proxy, Pomerium, Authelia, ...), you can instead let the proxy authenticate users and pass their identity in a header ([OpenClaw docs](https://docs.openclaw.ai/gateway/trusted-proxy-auth)). It is **opt-in**: a plain Nginx Proxy Manager proxy host doesn't authenticate anyone, so the token stays the default.
 
-Answer **yes** to *Delegate authentication to the reverse proxy* in the generator, or add a `trusted_proxy` object to the JSON config:
+Fill in *Trusted proxies* and turn on *Delegate authentication to the reverse proxy* in the generator's Authentication section, or set `trusted_proxies` and a `trusted_proxy` object in the JSON config:
 
 ```json
 {
   "network_mode": "proxy",
   "public_urls": ["https://openclaw.example.com"],
+  "trusted_proxies": ["10.0.0.1"],
   "trusted_proxy": {
-    "proxies": ["172.18.0.0/16"],
     "user_header": "x-auth-request-email",
     "required_headers": ["x-forwarded-proto", "x-forwarded-host"],
     "allow_users": ["me@example.com"]
@@ -207,23 +223,33 @@ Answer **yes** to *Delegate authentication to the reverse proxy* in the generato
 
 | Key | Default | OpenClaw setting | Description |
 |---|---|---|---|
-| `proxies` | **required** | `gateway.trustedProxies` | IPs or CIDRs the proxy connects from. Requests from other sources are rejected. `0.0.0.0/0` and `::/0` are refused: list only proxies you control. |
-| `user_header` | **required** | `gateway.auth.trustedProxy.userHeader` | Header carrying the authenticated identity, e.g. `x-auth-request-email` (oauth2-proxy) or `x-pomerium-claim-email` (Pomerium). Stored lowercase. The interactive default is `x-forwarded-user`. |
-| `required_headers` | `[]` | `...requiredHeaders` | Headers that must be present and non-blank. The interactive default is `x-forwarded-proto, x-forwarded-host`, as in the OpenClaw example. |
+| `trusted_proxies` (top level) | **required** here | `gateway.trustedProxies` | The IP(s) your proxy connects from. Requests from other sources are rejected. CIDRs are accepted, but every address in the range can then assert any user identity, so list only your proxy's own IP(s). `0.0.0.0/0` and `::/0` are refused. Configs from earlier versions with `trusted_proxy.proxies` still load; saving moves the list to `trusted_proxies`. |
+| `user_header` | **required** | `gateway.auth.trustedProxy.userHeader` | Header carrying the authenticated identity, e.g. `x-auth-request-email` (oauth2-proxy) or `x-pomerium-claim-email` (Pomerium). Stored lowercase. The editor pre-fills `x-forwarded-user`. |
+| `required_headers` | `[]` | `...requiredHeaders` | Headers that must be present and non-blank. The editor pre-fills `x-forwarded-proto, x-forwarded-host`, as in the OpenClaw example. |
 | `allow_users` | `[]` | `...allowUsers` | Only these identities get in. **Empty allows every user the proxy authenticates**, so set it. |
-| `allow_loopback` | `false` | `...allowLoopback` | Accept a same-host loopback proxy (bridge/host mode). Loopback must also be in `proxies`. |
-| `device_auto_approve` | off | `...deviceAutoApprove` | `{"enabled": true, "scopes": ["operator.read"]}`: auto-approve new UI operator devices. Without `scopes`, OpenClaw's defaults apply; `openclaw security audit` flags `operator.admin` as critical. |
+| `allow_loopback` | `false` | `...allowLoopback` | Accept a same-host loopback proxy (bridge/host mode). Loopback must also be in `trusted_proxies`. |
+| `device_auto_approve` | off | `...deviceAutoApprove` | `{"enabled": true, "scopes": ["operator.read"]}`: let authenticated proxy users enroll UI devices. Without `scopes`, OpenClaw's defaults apply (`operator.read`, `operator.write`, `operator.approvals`, `operator.questions`); `openclaw security audit` flags `operator.admin` as critical. |
 | `identity_scopes` | `{}` | `gateway.auth.identityScopes` | Per-identity operator scopes, e.g. `{"admin@example.com": ["operator.admin"]}`. |
 
-Only the first four are asked interactively; edit the saved JSON for the rest.
+All of them can be set in the Authentication section; the advanced ones are below the allowed users.
 
 **What changes in the YAML**
 - `OPENCLAW_GATEWAY_TOKEN` is not set (the gateway fails to start when a shared token and trusted-proxy auth are both configured). `OPENCLAW_GATEWAY_PASSWORD` is passed through if provided.
-- The settings are passed as `OPENCLAW_CONFIG_OVERRIDES` and applied by the `doctor` stage with `openclaw config set` on **every deploy**, so a regenerated YAML always wins. The auth mode is always written (`trusted-proxy` or `token`), so switching back to token auth works without manual cleanup. If applying them fails, the stack stops instead of starting the gateway with the wrong authentication.
+- The settings are passed as `OPENCLAW_CONFIG_OVERRIDES` and applied by the `doctor` stage with `openclaw config set` on **every deploy**, so a regenerated YAML always wins. The auth mode (`trusted-proxy` or `token`) and `gateway.trustedProxies` (possibly empty) are always written, so switching back to token auth or removing proxies works without manual cleanup. If applying them fails, the stack stops instead of starting the gateway with the wrong authentication.
 - This relies on the updated `docker-entrypoint.sh`: with a prebuilt image, rebuild and push it first (the GitHub Actions workflow does this on push to `main`).
 
 **Setting it up**
-1. Find the proxy network's subnet and use it as `proxies`: `sudo docker network inspect ix-nginx-proxy-manager_default` (look for `IPAM > Config > Subnet`, e.g. `172.18.0.0/16`). A subnet is more robust than a single container IP, which changes when the container is recreated. OpenClaw rejects sources that match the gateway host's own addresses.
+1. Find your proxy's IP and use it in *Trusted proxies* (`trusted_proxies`, `gateway.trustedProxies`):
+   - Proxy container on the shared network (reverse proxy mode):
+
+     ```sh
+     sudo docker ps --format '{{.Names}}'   # find the proxy container
+     sudo docker inspect -f '{{(index .NetworkSettings.Networks "ix-nginx-proxy-manager_default").IPAddress}}' <proxy container>
+     ```
+
+   - Proxy on the TrueNAS host itself, reaching a published port (bridge mode): it usually connects from the Docker network's gateway IP, e.g. `172.17.0.1`.
+
+   A container's IP can change when it is recreated, and the gateway then rejects the proxy. Pin a static IP for the proxy container, or regenerate and redeploy after a change. For a quick fix inside the running app, the same setting takes a JSON list: `openclaw config set gateway.trustedProxies '["10.0.0.5"]'`. The next deploy overwrites it with the value from the YAML, so update the generator config too. OpenClaw rejects sources that match the gateway host's own addresses.
 2. The proxy must send the identity header and **overwrite** `X-Forwarded-For` and the other `x-forwarded-*` headers rather than append to them. A request from a trusted proxy without forwarded client headers is answered with `403 proxy_attribution_required`.
 3. Never expose the gateway port directly: the default proxy mode publishes none. In bridge/host mode, firewall the port so the proxy is the only path to it.
 4. `openclaw security audit` reports trusted-proxy auth as a critical finding by design.
@@ -273,17 +299,18 @@ Choose **Pull a prebuilt image** in the generator and enter the image reference.
 | Control UI says the origin is not allowed | The URL in the browser isn't in the allowed origins. Add it (see Updating). |
 | Gateway exits right after switching to trusted-proxy auth | Check `OPENCLAW_GATEWAY_TOKEN` isn't set in the app's environment (regenerate the YAML; the generator omits it). The gateway refuses to start with a token and trusted-proxy auth together. |
 | `403 proxy_attribution_required` | The request comes from a trusted proxy but without forwarded client headers. Make the proxy send (and overwrite) `X-Forwarded-For`. |
-| Users are rejected although the proxy authenticates them | Compare the proxy's identity header with `user_header` and the value with `allow_users`; check `proxies` covers the proxy's source address and `required_headers` are all sent. |
+| Users are rejected although the proxy authenticates them | Compare the proxy's identity header with `user_header` and the value with `allow_users`; check *Trusted proxies* holds the proxy's current IP (it may have changed if the proxy container was recreated) and `required_headers` are all sent. |
+| OpenClaw: `CLI backend claude-cli executable cannot be bound to one durable absolute owner` | OpenClaw only runs a `claude` it can fingerprint (the native binary), not pnpm's `#!/bin/sh` shim. The `update` stage links the real binary into `~/.local/native-bin`, which is first in `PATH`. Images and YAMLs from before this fix don't do that: regenerate the YAML (build mode) or pull the rebuilt image (prebuilt mode), then redeploy. Check with `docker exec <container> sh -c 'readlink -f "$(command -v claude)"'`, which should end in `claude.exe`. |
 | Port conflict on deploy | Choose another gateway port in the generator, or check that *Bind addresses* doesn't list the same address as another app. |
 | `network ... declared as external, but could not be found` | The proxy network doesn't exist yet (or has another name). Start the proxy app first and check `sudo docker network ls`. |
 | `Ignored build scripts` / `ERROR: logging before google.Init` in `update` logs | Harmless; see the main [README](README.md#troubleshooting). |
 
 ## Development
 
-The generator lives in `truenas/`: `compose_builder.py` builds the Compose document (pure logic), `settings.py` holds the non-secret settings and their JSON form, `envfile.py` loads the secrets, `validators.py` has the input checks shared by the prompts and the JSON loader, `clipboard.py` detects the clipboard backend and copies, and `generate_yaml.py` is the TUI/CLI. Tests and lint:
+The generator lives in `truenas/`: `compose_builder.py` builds the Compose document (pure logic), `settings.py` holds the non-secret settings, their JSON form and validation, `draft.py` converts between the editor's form values and the config and maps problems to fields, `tui.py` is the Textual app, `envfile.py` loads the secrets, `validators.py` has the input checks, `clipboard.py` detects the clipboard backend and copies, and `generate_yaml.py` is the command-line entry point. Tests and lint:
 
 ```sh
 cd truenas
-uv run --no-project --with pytest --with pyyaml --with questionary --with python-dotenv pytest
+uv run --no-project --with pytest --with pyyaml --with textual --with python-dotenv pytest
 ruff check . && ruff format --check .
 ```

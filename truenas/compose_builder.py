@@ -47,9 +47,12 @@ class ExtraNetwork:
 
 @dataclass(frozen=True)
 class TrustedProxy:
-    """Delegate gateway authentication to a reverse proxy (``trusted-proxy`` mode)."""
+    """Delegate gateway authentication to a reverse proxy (``trusted-proxy`` mode).
 
-    proxies: tuple[str, ...]
+    The proxies it trusts are ``AppConfig.trusted_proxies``, which also apply
+    with token auth.
+    """
+
     user_header: str
     required_headers: tuple[str, ...] = ()
     allow_users: tuple[str, ...] = ()
@@ -59,8 +62,6 @@ class TrustedProxy:
     identity_scopes: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.proxies:
-            raise ValueError("trusted-proxy auth needs at least one trusted proxy")
         if not self.user_header:
             raise ValueError("trusted-proxy auth needs the user header name")
 
@@ -92,6 +93,8 @@ class AppConfig:
     prebuilt_image: str = ""
     bind_addresses: tuple[str, ...] = ("0.0.0.0",)
     extra_network: ExtraNetwork | None = None
+    # gateway.trustedProxies: proxies whose forwarded headers the gateway trusts.
+    trusted_proxies: tuple[str, ...] = ()
     trusted_proxy: TrustedProxy | None = None
     timezone: str = "UTC"
     skip_update: bool = False
@@ -104,6 +107,8 @@ class AppConfig:
             raise ValueError("proxy mode requires the proxy network to join")
         if self.network_mode == "bridge" and not self.bind_addresses:
             raise ValueError("at least one bind address is required in bridge mode")
+        if self.trusted_proxy and not self.trusted_proxies:
+            raise ValueError("trusted-proxy auth needs at least one trusted proxy")
         if self.trusted_proxy and self.secrets.gateway_token:
             raise ValueError(
                 "the gateway refuses to start with trusted-proxy auth and a gateway token"
@@ -158,17 +163,18 @@ def volume_mounts(storage: Storage) -> list[str]:
 def config_overrides(config: AppConfig) -> list[dict[str, Any]]:
     """OpenClaw settings re-applied on every deploy (``openclaw config set`` batch).
 
-    Always sets the auth mode, so switching between token and trusted-proxy auth
-    in a regenerated YAML never leaves the previous mode behind.
+    Always sets the auth mode and the trusted proxies (possibly empty), so a
+    regenerated YAML never leaves a previous mode or proxy list behind.
     """
+    proxies = {"path": "gateway.trustedProxies", "value": list(config.trusted_proxies)}
     proxy = config.trusted_proxy
     if proxy is None:
-        return [{"path": "gateway.auth.mode", "value": "token"}]
+        return [{"path": "gateway.auth.mode", "value": "token"}, proxies]
 
     prefix = "gateway.auth.trustedProxy"
     overrides: list[dict[str, Any]] = [
         {"path": "gateway.auth.mode", "value": "trusted-proxy"},
-        {"path": "gateway.trustedProxies", "value": list(proxy.proxies)},
+        proxies,
         {"path": f"{prefix}.userHeader", "value": proxy.user_header},
         {"path": f"{prefix}.requiredHeaders", "value": list(proxy.required_headers)},
         {"path": f"{prefix}.allowUsers", "value": list(proxy.allow_users)},

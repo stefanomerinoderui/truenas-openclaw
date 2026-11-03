@@ -38,10 +38,10 @@ from validators import (
     validate_hosts,
     validate_image,
     validate_network_name,
+    validate_optional_trusted_proxies,
     validate_port,
     validate_required,
     validate_required_urls,
-    validate_trusted_proxies,
     validate_urls,
 )
 
@@ -69,6 +69,7 @@ TOP_LEVEL_KEYS = frozenset(
         "extra_origins",
         "public_urls",
         "proxy_network",
+        "trusted_proxies",
         "trusted_proxy",
         "storage",
         "timezone",
@@ -105,18 +106,31 @@ class Settings:
     extra_origins: tuple[str, ...] = ()
     public_urls: tuple[str, ...] = ()
     proxy_network: ExtraNetwork | None = None
+    trusted_proxies: tuple[str, ...] = ()
     trusted_proxy: TrustedProxy | None = None
     timezone: str = "UTC"
     packages: tuple[str, ...] = tuple(DEFAULT_PACKAGES.split())
     skip_update: bool = False
 
 
+Issue = tuple[str, str]  # (dotted JSON path, or "" for the whole file; message)
+
+
+def format_issue(issue: Issue) -> str:
+    path, message = issue
+    return f"{path}: {message}" if path else message
+
+
 class ConfigError(ValueError):
     """The JSON config is unreadable or invalid; lists every problem found."""
 
-    def __init__(self, problems: list[str]) -> None:
-        super().__init__("\n".join(f"- {problem}" for problem in problems))
-        self.problems = problems
+    def __init__(self, issues: list[Issue]) -> None:
+        self.issues = issues
+        super().__init__("\n".join(f"- {problem}" for problem in self.problems))
+
+    @property
+    def problems(self) -> list[str]:
+        return [format_issue(issue) for issue in self.issues]
 
 
 def default_timezone() -> str:
@@ -154,6 +168,7 @@ def build_app_config(settings: Settings, secrets: Secrets) -> AppConfig:
         host_port=port,
         bind_addresses=settings.bind_addresses,
         extra_network=settings.proxy_network,
+        trusted_proxies=settings.trusted_proxies,
         trusted_proxy=settings.trusted_proxy,
         storage=settings.storage,
         secrets=secrets,
@@ -191,6 +206,8 @@ def settings_to_dict(settings: Settings) -> dict[str, Any]:
         data["hosts"] = list(settings.hosts)
         data["extra_origins"] = list(settings.extra_origins)
 
+    if settings.trusted_proxies:
+        data["trusted_proxies"] = list(settings.trusted_proxies)
     if settings.trusted_proxy:
         data["trusted_proxy"] = _trusted_proxy_to_dict(settings.trusted_proxy)
 
@@ -205,7 +222,6 @@ def settings_to_dict(settings: Settings) -> dict[str, Any]:
 
 def _trusted_proxy_to_dict(proxy: TrustedProxy) -> dict[str, Any]:
     data: dict[str, Any] = {
-        "proxies": list(proxy.proxies),
         "user_header": proxy.user_header,
         "required_headers": list(proxy.required_headers),
         "allow_users": list(proxy.allow_users),
@@ -238,14 +254,14 @@ class _Reader:
     """Typed access to one JSON object that collects every problem it finds."""
 
     def __init__(
-        self, data: dict[str, Any], problems: list[str], prefix: str = ""
+        self, data: dict[str, Any], issues: list[Issue], prefix: str = ""
     ) -> None:
         self.data = data
-        self.problems = problems
+        self.issues = issues
         self.prefix = prefix
 
     def fail(self, key: str, message: str) -> None:
-        self.problems.append(f"{self.prefix}{key}: {message}")
+        self.issues.append((f"{self.prefix}{key}", message))
 
     def _get(self, key: str, default: Any) -> Any:
         if key in self.data:
@@ -333,7 +349,7 @@ class _Reader:
         if not isinstance(value, dict):
             self.fail(key, "must be an object")
             return None
-        reader = _Reader(value, self.problems, prefix=f"{self.prefix}{key}.")
+        reader = _Reader(value, self.issues, prefix=f"{self.prefix}{key}.")
         reader.reject_unknown(allowed)
         return reader
 
@@ -386,9 +402,7 @@ def _read_identity_scopes(section: _Reader) -> dict[str, tuple[str, ...]]:
             "identity_scopes", "must be an object mapping an identity to its scopes"
         )
         return {}
-    scopes = _Reader(
-        value, section.problems, prefix=f"{section.prefix}identity_scopes."
-    )
+    scopes = _Reader(value, section.issues, prefix=f"{section.prefix}identity_scopes.")
     return {identity: scopes.strings(identity, ()) for identity in value}
 
 
@@ -404,7 +418,10 @@ def _read_trusted_proxy(top: _Reader) -> dict[str, Any] | None:
     device = section.section("device_auto_approve", DEVICE_AUTO_APPROVE_KEYS)
     required_headers = section.strings("required_headers", (), validate_header_names)
     return {
-        "proxies": section.strings("proxies", _REQUIRED, validate_trusted_proxies),
+        # Configs from before trusted_proxies was a top-level key.
+        "legacy_proxies": section.strings(
+            "proxies", (), validate_optional_trusted_proxies
+        ),
         "user_header": section.string(
             "user_header", _REQUIRED, validate_header_name
         ).lower(),
@@ -422,9 +439,9 @@ def _read_trusted_proxy(top: _Reader) -> dict[str, Any] | None:
 def parse_settings(data: object) -> Settings:
     """Validate parsed JSON and turn it into Settings, or raise ConfigError."""
     if not isinstance(data, dict):
-        raise ConfigError(["the top level must be a JSON object"])
-    problems: list[str] = []
-    top = _Reader(data, problems)
+        raise ConfigError([("", "the top level must be a JSON object")])
+    issues: list[Issue] = []
+    top = _Reader(data, issues)
     top.reject_unknown(TOP_LEVEL_KEYS)
 
     image_source = top.choice("image_source", IMAGE_SOURCES, "inline")
@@ -454,7 +471,19 @@ def parse_settings(data: object) -> Settings:
         hosts = top.strings("hosts", _REQUIRED, validate_hosts)
         extra_origins = top.strings("extra_origins", (), validate_urls)
 
+    trusted_proxies = top.strings(
+        "trusted_proxies", (), validate_optional_trusted_proxies
+    )
     trusted_proxy = _read_trusted_proxy(top)
+    if trusted_proxy is not None:
+        legacy_proxies = trusted_proxy.pop("legacy_proxies")
+        trusted_proxies = trusted_proxies or legacy_proxies
+        already_reported = any(path == "trusted_proxies" for path, _ in issues)
+        if not trusted_proxies and not already_reported:
+            top.fail(
+                "trusted_proxies",
+                "required with trusted-proxy auth: the IP(s) of your proxy",
+            )
     storage = _read_storage(top)
     timezone = top.string("timezone", default_timezone(), validate_required)
     packages = top.strings(
@@ -462,8 +491,8 @@ def parse_settings(data: object) -> Settings:
     )
     skip_update = top.boolean("skip_update", False)
 
-    if problems:
-        raise ConfigError(problems)
+    if issues:
+        raise ConfigError(issues)
     return Settings(
         image_source=image_source,
         network_mode=mode,
@@ -475,6 +504,7 @@ def parse_settings(data: object) -> Settings:
         extra_origins=extra_origins,
         public_urls=public_urls,
         proxy_network=proxy_network,
+        trusted_proxies=trusted_proxies,
         trusted_proxy=TrustedProxy(**trusted_proxy) if trusted_proxy else None,
         timezone=timezone,
         packages=packages,
@@ -482,13 +512,41 @@ def parse_settings(data: object) -> Settings:
     )
 
 
-def load_settings(path: Path) -> Settings:
+def read_config_json(path: Path) -> object:
+    """The parsed JSON of a config file, without validating it.
+
+    Lets the editor open a config that has invalid values so they can be fixed.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as err:
-        raise ConfigError([f"cannot read {path}: {err}"]) from err
+        raise ConfigError([("", f"cannot read {path}: {err}")]) from err
     try:
-        data = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError as err:
-        raise ConfigError([f"{path} is not valid JSON: {err}"]) from err
-    return parse_settings(data)
+        raise ConfigError([("", f"{path} is not valid JSON: {err}")]) from err
+
+
+def load_settings(path: Path) -> Settings:
+    return parse_settings(read_config_json(path))
+
+
+def default_settings_dict() -> dict[str, Any]:
+    """The starting point of a new config: the recommended reverse-proxy setup."""
+    return {
+        "image_source": "inline",
+        "network_mode": "proxy",
+        "proxy_network": {
+            "name": DEFAULT_PROXY_NETWORK,
+            "hostname": DEFAULT_PROXY_HOSTNAME,
+        },
+        "public_urls": [DEFAULT_PUBLIC_URL],
+        "port": CONTAINER_PORT,
+        "bind_addresses": ["0.0.0.0"],
+        "hosts": [DEFAULT_HOSTS],
+        "extra_origins": [],
+        "storage": {"kind": "host", "base_path": DEFAULT_STORAGE_PATH},
+        "timezone": default_timezone(),
+        "packages": DEFAULT_PACKAGES.split(),
+        "skip_update": False,
+    }

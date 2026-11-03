@@ -25,7 +25,7 @@ Docker image and Compose stack that runs the [OpenClaw](https://docs.openclaw.ai
 | `Dockerfile` | Alpine image with Node 24, pnpm, `tini`, `tzdata`, Claude Code runtime deps (`libgcc`, `libstdc++`, `ripgrep`) and `gcompat`. |
 | `docker-entrypoint.sh` | Stage logic: `update`, `doctor`, `setup` (both), or any command (runs `setup` first unless `RUN_SETUP=0`). |
 | `docker-compose.yml` | The staged stack and its volumes. |
-| `truenas/` | Python TUI / CLI that generates the TrueNAS *Install via YAML* definition, interactively or from a JSON config plus `.env` secrets (see [TRUENAS.md](TRUENAS.md#json-config-and-env-file)). |
+| `truenas/` | Full-screen terminal editor (Textual) that generates the TrueNAS *Install via YAML* definition and saves/edits a JSON config, with secrets kept in `.env` (see [TRUENAS.md](TRUENAS.md#1-generate-the-yaml)). |
 | `TRUENAS.md` | TrueNAS installation guide. |
 | `.github/workflows/docker-publish.yml` | CI: lint + tests, then builds and pushes the image to GHCR (see [TRUENAS.md](TRUENAS.md#from-github-actions-ghcr)). |
 | `.env.example` | Template for `.env`. |

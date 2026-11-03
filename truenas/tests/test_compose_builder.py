@@ -22,6 +22,7 @@ from compose_builder import (
 from settings import build_origins
 from validators import (
     parse_bind_addresses,
+    parse_list,
     validate_bind_addresses,
     validate_dataset_path,
     validate_header_name,
@@ -30,6 +31,7 @@ from validators import (
     validate_hosts,
     validate_identities,
     validate_network_name,
+    validate_optional_trusted_proxies,
     validate_required_urls,
     validate_trusted_proxies,
     validate_urls,
@@ -264,7 +266,17 @@ def test_build_origins_deduplicates_and_formats_ipv6():
         (validate_trusted_proxies, "", False),
         (validate_trusted_proxies, "proxy.local", False),
         (validate_trusted_proxies, "0.0.0.0/0", False),
+        (validate_trusted_proxies, '["10.0.0.1", "172.17.0.1"]', True),
+        (validate_trusted_proxies, '["10.0.0.1"', False),
+        (validate_trusted_proxies, "[1]", False),
+        (validate_trusted_proxies, "[]", False),
+        (validate_trusted_proxies, '["proxy.local"]', False),
         (validate_trusted_proxies, "::/0", False),
+        (validate_optional_trusted_proxies, "", True),
+        (validate_optional_trusted_proxies, "[]", True),
+        (validate_optional_trusted_proxies, "10.0.0.1, 172.17.0.1", True),
+        (validate_optional_trusted_proxies, "0.0.0.0/0", False),
+        (validate_optional_trusted_proxies, '["10.0.0.1"', False),
         (validate_header_name, "x-forwarded-user", True),
         (validate_header_name, "X_Auth_Email", True),
         (validate_header_name, "bad header", False),
@@ -282,7 +294,6 @@ def test_validators(validator, value, ok):
 
 
 TRUSTED = TrustedProxy(
-    proxies=("172.18.0.0/16",),
     user_header="x-auth-request-email",
     required_headers=("x-forwarded-proto", "x-forwarded-host"),
     allow_users=("me@example.com",),
@@ -293,6 +304,7 @@ def trusted_config(**overrides) -> AppConfig:
     values = {
         "network_mode": "proxy",
         "extra_network": ExtraNetwork("ix-nginx-proxy-manager_default", "openclaw"),
+        "trusted_proxies": ("172.18.0.0/16",),
         "trusted_proxy": TRUSTED,
         "secrets": Secrets(""),
     }
@@ -305,10 +317,21 @@ def overrides_of(compose: dict, service: str = "openclaw") -> list[dict]:
     return json.loads(env["OPENCLAW_CONFIG_OVERRIDES"])
 
 
-def test_token_mode_resets_the_auth_mode_on_every_deploy():
+def test_token_mode_resets_the_auth_mode_and_proxies_on_every_deploy():
     compose = roundtrip(make_config())
-    assert overrides_of(compose) == [{"path": "gateway.auth.mode", "value": "token"}]
+    assert overrides_of(compose) == [
+        {"path": "gateway.auth.mode", "value": "token"},
+        {"path": "gateway.trustedProxies", "value": []},
+    ]
     assert compose["services"]["openclaw"]["environment"]["OPENCLAW_GATEWAY_TOKEN"]
+
+
+def test_trusted_proxies_also_apply_with_token_auth():
+    config = make_config(trusted_proxies=("10.0.0.1", "172.17.0.1"))
+    assert overrides_of(roundtrip(config)) == [
+        {"path": "gateway.auth.mode", "value": "token"},
+        {"path": "gateway.trustedProxies", "value": ["10.0.0.1", "172.17.0.1"]},
+    ]
 
 
 def test_trusted_proxy_sets_the_documented_gateway_keys():
@@ -330,7 +353,6 @@ def test_trusted_proxy_sets_the_documented_gateway_keys():
 
 def test_trusted_proxy_advanced_options_are_passed_through():
     proxy = TrustedProxy(
-        proxies=("10.0.0.1",),
         user_header="x-forwarded-user",
         allow_loopback=True,
         device_auto_approve=True,
@@ -378,6 +400,25 @@ def test_trusted_proxy_and_gateway_token_are_mutually_exclusive():
 
 def test_trusted_proxy_needs_a_proxy_and_a_header():
     with pytest.raises(ValueError, match="at least one trusted proxy"):
-        TrustedProxy(proxies=(), user_header="x-user")
+        trusted_config(trusted_proxies=())
     with pytest.raises(ValueError, match="user header"):
-        TrustedProxy(proxies=("10.0.0.1",), user_header="")
+        TrustedProxy(user_header="")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("10.0.0.1, 172.17.0.1", ["10.0.0.1", "172.17.0.1"]),
+        ('["10.0.0.1", "172.17.0.1"]', ["10.0.0.1", "172.17.0.1"]),
+        ('  [" 10.0.0.1 ", ""]  ', ["10.0.0.1"]),
+        ("", []),
+    ],
+)
+def test_parse_list_accepts_comma_separated_and_json(value, expected):
+    assert parse_list(value) == expected
+
+
+@pytest.mark.parametrize("value", ['["10.0.0.1"', "[1, 2]", '["a", null]'])
+def test_parse_list_rejects_malformed_json_lists(value):
+    with pytest.raises(ValueError):
+        parse_list(value)

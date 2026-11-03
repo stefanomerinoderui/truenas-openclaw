@@ -1,12 +1,13 @@
 """Input validators shared by the interactive prompts and the JSON config loader.
 
 Every ``validate_*`` function returns ``True`` or an error message, which is the
-contract questionary expects from its ``validate`` callbacks.
+contract the editor and the JSON loader rely on.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 from urllib.parse import urlparse
 
@@ -19,6 +20,21 @@ HEADER_NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
 def split_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def parse_list(value: str) -> list[str]:
+    """Comma-separated values, or a JSON list of strings like ``["10.0.0.1"]``.
+
+    The JSON form matches what ``openclaw config set <path> '<json>'`` takes, so
+    values can be pasted either way. Raises ValueError for a malformed JSON list.
+    """
+    text = value.strip()
+    if not text.startswith("["):
+        return split_list(value)
+    items = json.loads(text)  # JSONDecodeError is a ValueError
+    if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
+        raise ValueError("expected a JSON list of strings")
+    return [item.strip() for item in items if item.strip()]
 
 
 def parse_bind_addresses(value: str) -> tuple[str, ...]:
@@ -67,10 +83,14 @@ def validate_hostname(value: str) -> bool | str:
 
 
 def validate_trusted_proxies(value: str) -> bool | str:
-    """Proxy IPs or CIDRs, e.g. the proxy network's subnet."""
-    items = split_list(value)
+    """The proxy's IP(s) for ``gateway.trustedProxies`` (CIDRs are accepted too)."""
+    example = 'e.g. 10.0.0.1, 172.17.0.1 or ["10.0.0.1", "172.17.0.1"]'
+    try:
+        items = parse_list(value)
+    except ValueError:
+        return f"Enter IPs comma-separated or as a JSON list of strings, {example}"
     if not items:
-        return "Enter at least one proxy IP or CIDR (e.g. 172.18.0.0/16)"
+        return f"Enter the IP of your proxy, {example}"
     for item in items:
         try:
             network = ipaddress.ip_network(item, strict=False)
@@ -79,6 +99,16 @@ def validate_trusted_proxies(value: str) -> bool | str:
         if network.prefixlen == 0:
             return f"{item} would trust every source; list only proxies you control"
     return True
+
+
+def validate_optional_trusted_proxies(value: str) -> bool | str:
+    """Like validate_trusted_proxies, but an empty list is fine (token auth)."""
+    try:
+        if not parse_list(value):
+            return True
+    except ValueError:
+        pass  # reported by validate_trusted_proxies
+    return validate_trusted_proxies(value)
 
 
 def validate_header_name(value: str) -> bool | str:

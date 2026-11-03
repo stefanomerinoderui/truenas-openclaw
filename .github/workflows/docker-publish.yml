@@ -51,7 +51,7 @@ jobs:
 
       - name: Test TrueNAS generator
         working-directory: truenas
-        run: uv run --no-project --with pytest --with pyyaml --with questionary --with python-dotenv pytest
+        run: uv run --no-project --with pytest --with pyyaml --with textual --with python-dotenv pytest
 
   build:
     needs: lint
