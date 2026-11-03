@@ -1,0 +1,19 @@
+# Secrets: real env files (the template .env.example stays tracked)
+.env
+.env.*
+!.env.example
+
+# YAML written by truenas/generate_yaml.py: it contains the gateway token and
+# API keys. Config JSON files hold no secrets and are not ignored.
+/*.yaml
+openclaw-truenas.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Custom configs
+openclaw-truenas.json
